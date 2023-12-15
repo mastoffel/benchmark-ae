@@ -8,8 +8,13 @@ readme = "README.md"
 packages = [{include = "benchmark_ae"}]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = ">=3.10,<3.13"
+pandas = "<2.1"
+autoemulate = {git = "https://github.com/alan-turing-institute/autoemulate.git"}
+numpy = "<1.24"
 
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.27.1"
 
 [build-system]
 requires = ["poetry-core"]

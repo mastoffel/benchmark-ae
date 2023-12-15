@@ -1,0 +1,222 @@
+---
+title: "Test Data Sets"
+format: 
+  html:
+    self-contained: true
+editor: visual
+---
+
+## UVic Climate Model
+
+A simple low dimensional problem using data from the University of Victoria climate model. You can read some limited detail in Wilkinson 2010 [here](https://rich-d-wilkinson.github.io/Publications.html).
+There are two inputs, Q10 and Kv (something to do with respiration in plants), and the simulator has been run 55 times at the inputs in `design`
+
+```{r}
+load('UVic.rda')
+head(design)
+```
+
+The outputs are a time series of CO2 values in `sim.co2`, as well as two flux values for the 80s and 90s in `sim.flux`. Each input to the simulator thus produces one time series and two fluxes. In the paper, we emulated both the fluxes, and the time series, by decomposing the multidimensional output with PCA first.
+
+```{r}
+matplot(sim.co2)
+```
+There are also the Keeling observed physical measurements of CO2 values in `field.co2` and `field.flux`. The aim is learn which input parameters lead to these measurements.
+
+## Climate data
+
+Climate model data from [here](https://www.nature.com/articles/s41558-018-0197-7). I think its from the GENIE model.
+
+```{r}
+library(tidyverse)
+dat=read_csv(file='Holden2018.csv')
+str(dat)
+```
+
+The aim is to predict the climate variables SAT, ACC, VEGC, SOILC, MAXPMOC, OCN_O2, fCaCO3, SIAREA_S from the  variables in columns 2 to 34 (indexing from 1). We found in the paper that considering different mean structures and covariance functions for each different output produced good results. This included using the LASSO to select a subset of input variables. I don't think we'd do it this way now, so it might be an interesting test set.
+
+The python code I used to build the emulators is copied below, in case it helps you make sense of the prediction problem.
+
+```{python, eval=F,python.reticulate = FALSE }
+
+def GPplusLinMean(X, y, k, n_restarts=1):
+    lm = linear_model.LinearRegression()
+    lm.fit(X, y)
+    lm.var = np.sum((lm.predict(X)-y)**2)/(X.shape[0]-X.shape[1]-1)
+    pred = lm.predict(X)
+    residuals = y-pred
+    residuals = residuals[:,None]
+    m = GPy.models.GPRegression(X,residuals,k)
+    m.optimize_restarts(n_restarts, messages=0, robust=True)
+    return(lm, m)
+
+def GPplusStepwiseMean(X, Xdesign,y,k,n_restarts=1):
+    lm = linear_model.LinearRegression()
+    lm.fit(Xdesign, y)
+    lm.var = np.sum((lm.predict(Xdesign)-y)**2)/(Xdesign.shape[0]-Xdesign.shape[1]-1)
+    # add in the linear model residual sum of squares
+    pred = lm.predict(Xdesign)
+    residuals = y-pred
+    residuals = residuals[:,None]
+    m = GPy.models.GPRegression(X,residuals,k)
+    m.optimize_restarts(n_restarts, messages=0, robust=True)
+    return(lm, m)
+
+
+def StepwiseMean(X, Xdesign,y):
+    lm = linear_model.LinearRegression()
+    lm.fit(Xdesign, y)
+    lm.var = np.sum((lm.predict(Xdesign)-y)**2)/(Xdesign.shape[0]-Xdesign.shape[1]-1)
+    # add in the linear model residual sum of squares
+    return([lm])
+
+
+def train(X,data, n_restarts=1):
+    # X is just the covariates
+    # needs to be a pandas dataframe
+    #
+    # data should be a pandas dataframe that contains inputs and outputs with column labels
+    # returns a dictionary
+    # with elements msat, macc, mvegc etc
+    # if a GP and a linear mean is used, msat will contain two elements, a linear model and a GPy model
+    model={}
+
+    # SAT
+    print('SAT')
+    ksat = GPy.kern.RBF(X.shape[1], ARD =True)
+    model['SAT'] = GPplusLinMean(X, data.SAT, ksat, n_restarts)
+
+
+    # ACC
+    print('ACC')
+
+    kacc = GPy.kern.Matern32(X.shape[1], ARD =True)
+    model['ACC'] = GPplusLinMean(X, data.ACC, kacc, n_restarts)
+
+    # VEGC
+    print('VEGC')
+
+    vegc_formula = 'VEGC~ODC + SCF + RCRITMIN + GAMMA + VFC + VBP + LLR + APM + VFC:I(VFC * 1) + LLR:I(LLR * 1) + VBP:LLR + VBP:I(VBP * 1) + VBP:APM + VFC:APM + VFC:VBP + GAMMA:I(GAMMA * 1) + SCF:VBP + SCF:LLR + LLR:APM + VFC:LLR'
+    _, Xvegc = patsy.dmatrices(vegc_formula, data, return_type='dataframe')
+    #kvegc = GPy.kern.Matern32(X.shape[1], ARD =True)
+    #model['VEGC'] = GPplusStepwiseMean(X, Xvegc, data.VEGC, kvegc, n_restarts)
+    model['VEGC']=StepwiseMean(X, Xvegc,data.VEGC)
+    model['VEGC'][0].formula = vegc_formula
+
+    # SOILC - use LASSO
+    print('SOILC')
+    # perhaps use stepwise as almost as good anyway.
+    #alphas = np.logspace(-10, 3, 30)
+    #from sklearn.preprocessing import PolynomialFeatures
+    #poly = PolynomialFeatures(2, interaction_only=False, include_bias=False)
+    soilc_formula = 'SOILC~TSWR1 + TSWR2 + ACLLWR + RCRITMIN + VFC + VBP + SRT + APM + ALBSM + VFC:I(VFC * 1) + SRT:I(SRT * 1) + ACLLWR:I(ACLLWR * 1) + VBP:SRT + VFC:SRT + TSWR1:I(TSWR1 * 1) + RCRITMIN:I(RCRITMIN * 1) + VFC:VBP + APM:ALBSM'
+    _, Xsoilc = patsy.dmatrices(soilc_formula, data, return_type='dataframe')
+    model['SOILC']=StepwiseMean(X, Xsoilc,data.SOILC)
+    model['SOILC'][0].formula = soilc_formula
+
+    # MAXAMOC
+    print('MAXAMOC')
+    kmaxamoc = GPy.kern.Matern52(X.shape[1], ARD=True)
+    model['MAXAMOC'] = GPplusLinMean(X, data.MAXAMOC, kmaxamoc, n_restarts)
+
+    # MAXPMOC
+    print('MAXPMOC')
+    kmaxpmoc = GPy.kern.RBF(X.shape[1], ARD =True)
+    model['MAXPMOC']= GPplusLinMean(X, data.MAXPMOC, kmaxpmoc, n_restarts)
+
+    # OCN_O2
+    print('OCN_O2')
+    ocn_o2_formula = 'OCN_O2 ~ OVD + ODC + SCF + VDIFF + TSWR1 + TSWR2 + ACLLWR + TH2OC + GAMMA + VFC + VBP + LLR + PMX + PHS + PRP + PRD + APM + ALBSM + ASG + PHS:I(PHS * 1) + ACLLWR:I(ACLLWR * 1) + PRD:I(PRD * 1) + TSWR1:I(TSWR1 * 1) + PMX:PHS + PRP:PRD + VDIFF:PMX + TH2OC:I(TH2OC * 1) + ODC:PMX + OVD:GAMMA + OVD:VBP + TSWR1:PMX + ACLLWR:VBP + OVD:APM + VFC:ALBSM + VFC:PMX + PRP:ASG'
+    _, Xocn_o2 = patsy.dmatrices(ocn_o2_formula, data, return_type='dataframe')
+    kocn_o2 = GPy.kern.Matern52(X.shape[1], ARD =True)
+    model['OCN_O2'] = GPplusStepwiseMean(X, Xocn_o2, data.OCN_O2, kocn_o2, n_restarts)
+    model['OCN_O2'][0].formula = ocn_o2_formula
+
+    #fCaCO3
+    print('fCaCO3')
+    kfCaCO3 = GPy.kern.Matern52(X.shape[1], ARD=True)
+    model['fCaCO3'] = GPplusLinMean(X, data.fCaCO3, kfCaCO3, n_restarts)
+
+    #SIAREA_S
+    print('SIAREA_S')
+    ksiarea_s = GPy.kern.Matern52(X.shape[1], ARD=True)
+    model['SIAREA_S'] = GPplusLinMean(X, data.SIAREA_S, ksiarea_s, n_restarts)
+
+
+    return(model)
+
+
+
+if __name__=="__main__":
+    alldata=pa.read_csv('Alldata_new.csv')#, skipfooter=600)
+#    print('WARNING - only loaded part of data')
+    X = alldata.values[:,1:33]
+    m = train(X, alldata, n_restarts=10)
+    pickle.dump(m, open("Results/FittedModel_new.p", "wb"))
+```
+
+```{python, eval=F, python.reticulate = FALSE}
+#
+#  Code testing out the emulator
+#
+#
+
+import GPy
+import pandas as pa
+import patsy
+from sklearn import linear_model
+import pickle
+
+from Train import *
+from sklearn import cross_validation
+from Prediction import *
+
+alldata=pa.read_csv('Alldata_new.csv')
+
+RMSEs = np.zeros((10,9))
+coverage95 = np.zeros((10,9))
+miss_below = np.zeros((10,9))
+miss_above = np.zeros((10,9))
+
+for counter in range(10):
+    data_train, data_test = cross_validation.train_test_split(alldata, test_size=0.2)
+    X_train = data_train.values[:,1:33]
+    m = train(X_train, data_train, n_restarts=2)
+    Xpred = data_test.ix[:,1:33]
+
+    pred_mu, pred_var = predict(Xpred, m)
+    test_y = data_test[["SAT", "ACC", "VEGC", "SOILC", "MAXAMOC", "MAXPMOC", "OCN_O2", "fCaCO3", "SIAREA_S"]]
+    RMSEs[counter,:] = np.sqrt(np.mean((pred_mu - test_y)**2))
+    above_lower = test_y >= pred_mu-1.96*np.sqrt(pred_var)
+    below_upper = test_y <= pred_mu+1.96*np.sqrt(pred_var)
+    in_int = np.bitwise_and(above_lower, below_upper)
+    coverage95[counter,:] = (np.sum(in_int,axis=0)/in_int.shape[0])
+    miss_below[counter,:] = (np.sum(1-above_lower,axis=0)/in_int.shape[0])
+    miss_above[counter,:] = (np.sum(1- below_upper,axis=0)/in_int.shape[0])
+print(RMSEs)
+print(np.mean(RMSEs,0))
+print(np.mean(coverage95,0))
+print(np.mean(miss_below,0))
+print(np.mean(miss_above,0))
+
+results = np.array((np.mean(RMSEs,0), np.mean(coverage95,0), np.mean(miss_below,0), np.mean(miss_above,0)))
+np.savetxt("Results/NewTrainingErrors_GPvarOnly_new.csv", results, delimiter=",")
+
+
+
+# Problem - getting very negative predictions! SOILC, VEGC
+# Also the uncertainty aspects are way off.
+```
+
+## Spherical data
+
+The file `ModelData_comparison.txt` contains palaeo data collected from multiple different locations around the world. x and y are the latitude and longitude in degrees, and z is the observation. `std` is the standard deviation of the noise on the observation (ie it is heteroskedastic noise). 
+```{r}
+dat=read.csv('ModelData_comparison.txt', sep='\t')
+head(dat)
+```
+
+The challenge here is to build an emulator that knows this data is on the globe (ie on something close to a sphere). We did this by building an emulator that uses the Haversine distance. I've included a Python notebook (`SphericalGP_Demo.ipynb`) that demonstrate the details.
+
+The motivation for this emulator was to build a spatial prediction model that could then be used to compare climate model output to the paleo record. The paper is [here](https://cp.copernicus.org/articles/16/1953/2020/).
+
