@@ -10,7 +10,7 @@ Original zenodo data in cardiac/original
 
 ### cardiac1
 
-atrial_cell_model/ionic   
+atrial_cell_model/ionic  
 sampled with LHS
 
 ### cardiac2
